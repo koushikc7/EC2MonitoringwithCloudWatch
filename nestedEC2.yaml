@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Preconfigured Windows Server EC2 instance
+Parameters:
+  AmiID:
+    Type: String
+  UserData:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+
+Resources:
+
+# IAM role for Windows server
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: WSInstanceMonitoring
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentAdminPolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonS3ReadOnlyAccess
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: WSInstanceMonitoring
+      Roles:
+        - !Ref InstanceRole
+
+  WSInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: t2.medium
+      Tags:
+        - Key: Name
+          Value: 'WS instance'
+      UserData: !Ref UserData
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref InstanceProfile
+
+Outputs:
+  WSInstanceID:
+    Value: !Ref WSInstance
+    Description: the instance ID
+    Export:
+      Name: WSInstanceID

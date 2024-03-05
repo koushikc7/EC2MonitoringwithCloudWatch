@@ -1,0 +1,5 @@
+<powershell>
+$scriptPath = "C:\Temp\user_data_all_config.ps1"
+Read-S3Object -BucketName cloudformation-templates-${date}  -Key user_data_all_config.txt -File C:\Temp\user_data_all_config.ps1
+Invoke-Expression -Command "$scriptPath"
+</powershell>

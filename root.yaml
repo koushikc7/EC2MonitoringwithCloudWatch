@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy monitoring of Windows Server EC2 instance with CloudWatch
+
+Parameters:
+  TemplateUrlBase: 
+    Type: String
+    Description: Base URL for CloudFormation templates
+    Default: ''
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to place the EC2 Instance in
+    Default: ''
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet within the selected VPC to place the EC2 Instance in
+    Default: ''
+  AmiID :
+    Description: Latest Managed AMI ID for Windows 2022 server for EC2 Instance (current region)
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+  UserData:
+    Type: String
+    Description: User Data content for the ec2 instance
+    Default: ''
+  SNSEndpointEmail:
+    Type: String
+    Description: Email for sending notification about alarm status changes
+    Default: ''
+  Region:
+    Type: String
+    Default: "eu-central-1"
+
+
+Resources:
+
+  nestedEC2:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateUrlBase}/nestedEC2.yaml'
+      Parameters:
+        UserData: !Ref UserData
+        VpcId: !Ref VpcId
+        SubnetId: !Ref SubnetId
+        AmiID: !Ref AmiID
+
+  nestedSNS:
+    DependsOn:
+      - nestedEC2
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateUrlBase}/nestedSNS.yaml'
+      Parameters:
+        SNSEndpointEmail: !Ref SNSEndpointEmail
+
+  nestedCloudwatch:
+    DependsOn:
+      - nestedSNS
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateUrlBase}/nestedCloudwatch.yaml'
+      Parameters:
+        InstanceId: !GetAtt nestedEC2.Outputs.WSInstanceID
+        SNSTopicArn: !GetAtt nestedSNS.Outputs.SNSTopicArn
+        Region: !Ref Region
+
+

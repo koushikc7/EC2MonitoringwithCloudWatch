@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Windows CloudWatch Alarms, Metric Filters and Dashboard
+Parameters:
+  InstanceId:
+    Type: AWS::EC2::Instance::Id
+  SNSTopicArn:
+    Type: String
+  Region:
+    Type: String
+
+Resources:
+#create the log group
+  CreateLogGroupFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CreateLogGroupFunctionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                Resource: "*"
+
+
+  CreateLogGroupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CreateLogGroupFunction
+      Handler: index.lambda_handler
+      Role: !GetAtt CreateLogGroupFunctionRole.Arn
+      Environment:
+        Variables:
+          InstanceId: !Ref InstanceId
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+          import cfnresponse
+          import time
+          def lambda_handler(event, context):
+              try:
+                  instance_id = os.environ['InstanceId']
+                  log_group_name = f'monitoring/ec2/{instance_id}'
+                  log_stream_name = 'DiskSpace'
+                  client = boto3.client('logs')
+                  response = client.describe_log_groups(logGroupNamePrefix=log_group_name)
+                  if 'logGroups' in response and len(response['logGroups']) > 0:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Message': 'Log group already exists'})
+                      return
+                  else:
+                      response = client.create_log_group(logGroupName=log_group_name)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Message': 'Log group created successfully'})
+                      # Add a dummy log entry to the new log stream
+                      log_entry = {
+                          'InstanceId': instance_id,  # Include InstanceId in the log entry
+                          'DeviceID': 'C:',
+                          'TotalSpace': 3200000000,
+                          'FreeSpace': 1100000000,
+                          'UsedSpace': 2000000000
+                      }
+                      response = client.create_log_stream(
+                          logGroupName=log_group_name,
+                          logStreamName=log_stream_name
+                      )
+                      client.put_log_events(
+                          logGroupName=log_group_name,
+                          logStreamName=log_stream_name,
+                          logEvents=[{
+                              'message': json.dumps(log_entry),
+                              'timestamp': int(time.time()) * 1000
+                          }]
+                      )
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+      Runtime: python3.10
+
+  CreateLogGroupCustomResource:
+    Type: Custom::CreateLogGroup
+    Properties:
+      ServiceToken: !GetAtt CreateLogGroupFunction.Arn
+
+# Metric Filters
+  DiskspaceFreeC:
+    DependsOn:
+      - CreateLogGroupCustomResource
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub 'monitoring/ec2/${InstanceId}'
+      FilterName: DiskspaceFree_C
+      FilterPattern: '{ $.DeviceID = "C:" }'
+      MetricTransformations:
+        - MetricName: DiskspaceFree_C
+          MetricNamespace: !Sub 'monitoring/ec2/${InstanceId}'
+          MetricValue: $.FreeSpace
+          Unit: Gigabytes
+          Dimensions:
+            - Key: InstanceId
+              Value: $.InstanceId
+
+  DiskspaceUsedC:
+    DependsOn:
+      - CreateLogGroupCustomResource
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub 'monitoring/ec2/${InstanceId}'
+      FilterName: DiskspaceUsed_C
+      FilterPattern: '{ $.DeviceID = "C:" }'
+      MetricTransformations:
+        - MetricName: DiskspaceUsed_C
+          MetricNamespace: !Sub 'monitoring/ec2/${InstanceId}'
+          MetricValue: $.UsedSpace
+          Unit: Gigabytes
+          Dimensions:
+            - Key: InstanceId
+              Value: $.InstanceId
+
+  DiskspaceTotalC:
+    DependsOn:
+      - CreateLogGroupCustomResource
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub 'monitoring/ec2/${InstanceId}'
+      FilterName: DiskspaceTotal_C
+      FilterPattern: '{ $.DeviceID = "C:" }'
+      MetricTransformations:
+        - MetricName: DiskspaceTotal_C
+          MetricNamespace: !Sub 'monitoring/ec2/${InstanceId}'
+          MetricValue: $.TotalSpace
+          Unit: Gigabytes
+          Dimensions:
+            - Key: InstanceId
+              Value: $.InstanceId
+
+# Alarms
+  DiskSpaceWarning:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${InstanceId}.DiskSpaceWarning'
+      AlarmDescription: !Sub '${InstanceId} - less than 5 GB Drive space is in use'
+      AlarmActions:
+      - !Ref  SNSTopicArn
+      OKActions:
+      - !Ref  SNSTopicArn
+      MetricName: 'DiskspaceFree_C'
+      Namespace: !Sub 'monitoring/ec2/${InstanceId}'
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '3'
+      Threshold: '5000000000'
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref InstanceId
+
+  DiskSpaceCritical:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${InstanceId}.DiskSpaceCritical'
+      AlarmDescription: !Sub '${InstanceId} - less than 2.5 GB Drive space is in use'
+      AlarmActions:
+      - !Ref  SNSTopicArn
+      OKActions:
+      - !Ref  SNSTopicArn
+      MetricName: 'DiskspaceFree_C'
+      Namespace: !Sub 'monitoring/ec2/${InstanceId}'
+      Statistic: Average
+      Period: '300'
+      EvaluationPeriods: '3'
+      Threshold: '2500000000'
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref InstanceId
+
+# Dashboard 
+  DiskSpaceDashboard:
+    DependsOn:
+      - DiskSpaceWarning
+      - DiskSpaceCritical
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: DiskSpaceUsageAlarmsDashboard
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric",
+                "x": 0,
+                "y": 0,
+                "width": 16,
+                "height": 6,
+                "properties": {
+                  "metrics": [
+                    ["monitoring/ec2/${InstanceId}", "DiskspaceFree_C", "InstanceId", "${InstanceId}"],
+                    ["monitoring/ec2/${InstanceId}", "DiskspaceUsed_C", "InstanceId", "${InstanceId}"],
+                    ["monitoring/ec2/${InstanceId}", "DiskspaceTotal_C", "InstanceId", "${InstanceId}"]
+                  ],
+                  "view": "timeSeries",
+                  "stacked": false,
+                  "region": "${Region}",
+                  "title": "Disk Space Metrics",
+                  "period": 300,
+                  "stat": "Average",
+                  "yAxis": {
+                    "left": {
+                      "label": "GB"
+                    }
+                  },
+                  "annotations": {
+                    "horizontal": [
+                      {
+                        "value": 5000000000,
+                        "label": "Warning Alarm Threshold in Bytes",
+                        "color": "#FFA500"
+                      },
+                      {
+                        "value": 2500000000,
+                        "label": "Critical Alarm Threshold in Bytes",
+                        "color": "#FF0000"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "alarm",
+                "x": 0,
+                "y": 10,
+                "width": 16,
+                "height": 3,
+                "properties": {
+                  "title": "Alarm Status of ${DiskSpaceWarning}",
+                  "markdown": "Alarm Name: ${DiskSpaceWarning}",
+                  "alarms": [ "${DiskSpaceWarningArn}"],
+                  "fontSize": "18",
+                  "region": "${Region}"
+                }
+              },
+              {
+                "type": "alarm",
+                "x": 0,
+                "y": 10,
+                "width": 16,
+                "height": 3,
+                "properties": {
+                  "title": "Alarm Status of ${DiskSpaceCritical}",
+                  "markdown": "Alarm Name: ${DiskSpaceCritical}",
+                  "alarms": [ "${DiskSpaceCriticalArn}"],
+                  "fontSize": "18",
+                  "region": "${Region}"
+                }
+              }
+            ]
+          }
+        - Region: !Ref Region
+          InstanceId: !Ref InstanceId
+          DiskSpaceCritical: !Ref DiskSpaceCritical
+          DiskSpaceWarning: !Ref DiskSpaceWarning
+          DiskSpaceCriticalArn: !GetAtt DiskSpaceCritical.Arn
+          DiskSpaceWarningArn: !GetAtt DiskSpaceWarning.Arn
